@@ -31,6 +31,12 @@ from .rendering import (
 from .strategy import DefaultStrategy, MCMCStrategy, Strategy
 from .version import __version__
 
+# Metal backend for depth rendering (macOS only)
+try:
+    from . import metal
+except ImportError:
+    metal = None
+
 all = [
     "PngCompression",
     "DefaultStrategy",
@@ -58,5 +64,6 @@ all = [
     "fully_fused_projection_with_ut",
     "rasterize_to_pixels_eval3d",
     "export_splats",
+    "metal",
     "__version__",
 ]
