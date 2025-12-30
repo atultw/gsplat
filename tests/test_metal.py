@@ -9,7 +9,13 @@ import pytest
 import torch
 import numpy as np
 
-from gsplat.metal import render_depth, is_available, load_ply
+from gsplat.metal import (
+    render_depth,
+    is_available,
+    load_ply,
+    add_splats_from_image,
+    depth_to_points,
+)
 
 
 # Skip all tests if Metal is not available
@@ -237,6 +243,123 @@ def test_load_ply_not_implemented():
     """Test that load_ply raises appropriate error for missing file."""
     with pytest.raises((FileNotFoundError, IOError)):
         load_ply("nonexistent_file.ply")
+
+
+def test_depth_to_points():
+    """Test depth to 3D points conversion."""
+    # Simple test case
+    depth = torch.ones(10, 10) * 5.0  # 5 units depth
+    
+    # Identity camera at origin
+    camtoworld = torch.eye(4)
+    
+    # Simple intrinsics
+    K = torch.tensor([
+        [100, 0, 5],
+        [0, 100, 5],
+        [0, 0, 1]
+    ], dtype=torch.float32)
+    
+    points = depth_to_points(depth, camtoworld, K, z_depth=True)
+    
+    assert points.shape == (10, 10, 3)
+    
+    # Center pixel should be roughly at (0, 0, 5)
+    center_point = points[5, 5]
+    assert abs(center_point[2].item() - 5.0) < 0.1, "Z coordinate should be ~5"
+
+
+def test_add_splats_from_image_basic():
+    """Test adding splats from an image."""
+    # Create initial scene
+    params = {
+        "means": torch.randn(10, 3),
+        "quats": torch.randn(10, 4),
+        "scales": torch.ones(10, 3) * -2,
+        "opacities": torch.ones(10) * 2,
+        "colors": torch.randn(10, 3),
+    }
+    
+    # Create test image and depth
+    height, width = 32, 48
+    image = torch.rand(height, width, 3)
+    depth = torch.ones(height, width) * 5.0
+    
+    # Camera parameters
+    camera_quat = torch.tensor([1.0, 0.0, 0.0, 0.0])
+    camera_pos = torch.tensor([0.0, 0.0, -10.0])
+    
+    # Add splats
+    params_updated = add_splats_from_image(
+        params, image, depth, camera_quat, camera_pos,
+        fov_degrees=60, width=width, height=height,
+        downsample_factor=4
+    )
+    
+    # Check that Gaussians were added
+    n_original = params["means"].shape[0]
+    n_updated = params_updated["means"].shape[0]
+    assert n_updated > n_original, "Should have added new Gaussians"
+    
+    # Check shapes are consistent
+    assert params_updated["means"].shape[0] == n_updated
+    assert params_updated["quats"].shape == (n_updated, 4)
+    assert params_updated["scales"].shape == (n_updated, 3)
+    assert params_updated["opacities"].shape == (n_updated,)
+
+
+def test_add_splats_without_depth():
+    """Test adding splats without providing depth (uses default)."""
+    params = {
+        "means": torch.randn(5, 3),
+        "quats": torch.randn(5, 4),
+        "scales": torch.ones(5, 3) * -2,
+        "opacities": torch.ones(5) * 2,
+        "colors": torch.randn(5, 3),
+    }
+    
+    image = torch.rand(24, 32, 3)
+    camera_quat = torch.tensor([1.0, 0.0, 0.0, 0.0])
+    camera_pos = torch.tensor([0.0, 0.0, 0.0])
+    
+    # Add without depth
+    params_updated = add_splats_from_image(
+        params, image, None, camera_quat, camera_pos,
+        fov_degrees=60, width=32, height=24,
+        downsample_factor=4
+    )
+    
+    assert params_updated["means"].shape[0] > params["means"].shape[0]
+
+
+def test_add_splats_different_downsample():
+    """Test different downsample factors."""
+    params = {
+        "means": torch.randn(5, 3),
+        "quats": torch.randn(5, 4),
+        "scales": torch.ones(5, 3) * -2,
+        "opacities": torch.ones(5) * 2,
+        "colors": torch.randn(5, 3),
+    }
+    
+    image = torch.rand(64, 64, 3)
+    depth = torch.ones(64, 64) * 3.0
+    camera_quat = torch.tensor([1.0, 0.0, 0.0, 0.0])
+    camera_pos = torch.tensor([0.0, 0.0, 0.0])
+    
+    n_original = params["means"].shape[0]
+    
+    # Test different downsample factors
+    for factor in [2, 4, 8]:
+        params_updated = add_splats_from_image(
+            params, image, depth, camera_quat, camera_pos,
+            fov_degrees=60, width=64, height=64,
+            downsample_factor=factor
+        )
+        
+        n_added = params_updated["means"].shape[0] - n_original
+        expected_added = (64 // factor) * (64 // factor)
+        assert n_added == expected_added, f"With factor {factor}, added {n_added}, expected {expected_added}"
 
 
 if __name__ == "__main__":

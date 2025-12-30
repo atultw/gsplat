@@ -2,7 +2,7 @@
 
 ## Overview
 
-The gsplat Metal backend provides depth map rendering from Gaussian splats on macOS devices without requiring CUDA. This is a focused implementation that supports the essential depth rendering functionality.
+The gsplat Metal backend provides depth map rendering from Gaussian splats on macOS devices without requiring CUDA. This is a focused implementation that supports essential depth rendering and post-hoc scene expansion functionality.
 
 ## Quick Start
 
@@ -46,7 +46,39 @@ depth, alpha, _ = render_depth(
 ✅ **Metal-native** implementation (no CUDA required)  
 ✅ **ParameterDict** input format support  
 ✅ **PLY file** loading (optional)  
+✅ **Post-hoc splat addition** from camera images  
 ✅ **Simple API** - just render depth for any camera viewpoint
+
+## Post-hoc Splat Addition
+
+Add new Gaussians to your scene from camera observations:
+
+```python
+from gsplat.metal import add_splats_from_image
+
+# Start with existing scene
+params = {...}  # Your existing Gaussian parameters
+
+# New observation
+image = torch.rand(480, 640, 3)  # RGB image [H, W, 3]
+depth = torch.rand(480, 640) * 10  # Depth map [H, W]
+
+# Camera pose
+camera_quat = torch.tensor([1.0, 0.0, 0.0, 0.0])  # wxyz quaternion
+camera_pos = torch.tensor([0.0, 0.0, -5.0])  # position
+
+# Add new splats from this view
+params_updated = add_splats_from_image(
+    params, image, depth,
+    camera_quat, camera_pos,
+    fov_degrees=60,
+    width=640,
+    height=480,
+)
+
+# Now params_updated has more Gaussians!
+print(f"Added {params_updated['means'].shape[0] - params['means'].shape[0]} new splats")
+```
 
 ## What's Removed
 
@@ -70,14 +102,20 @@ See [`gsplat/metal/README.md`](gsplat/metal/README.md) for detailed documentatio
 
 ## Example
 
-Run the included example:
+Run the included examples:
 
 ```bash
-# With synthetic scene
+# Basic depth rendering
 python examples/metal_depth_example.py
 
 # With PLY file
 python examples/metal_depth_example.py path/to/splat.ply
+
+# Post-hoc splat addition
+python examples/metal_add_splats_example.py
+
+# With estimated depth
+python examples/metal_add_splats_example.py --estimated-depth
 ```
 
 ## Requirements
