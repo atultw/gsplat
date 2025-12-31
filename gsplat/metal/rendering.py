@@ -106,7 +106,7 @@ def rasterization_metal(
     sh_degree: Optional[int] = None,
     tile_size: int = 16,
     backgrounds: Optional[Tensor] = None,
-    render_mode: Literal["RGB", "D", "ED", "RGB+D", "RGB+ED"] = "RGB",
+    render_mode: Literal["RGB", "D", "ED", "RGB+D", "RGB+ED", "D_ALL"] = "RGB",
     rasterize_mode: Literal["classic", "antialiased"] = "classic",
 ) -> Tuple[Tensor, Tensor, Dict]:
     """Rasterize 3D Gaussians to images using Metal GPU backend.
@@ -131,13 +131,20 @@ def rasterization_metal(
         sh_degree: If set, interpret colors as SH coefficients.
         tile_size: Tile size for rasterization (default 16).
         backgrounds: Background colors. [C, D]
-        render_mode: "RGB", "D", "ED", "RGB+D", or "RGB+ED".
+        render_mode: Rendering mode. Options:
+            - "RGB": Render colors
+            - "D": Accumulated weighted depth (sum of w_i * z_i)
+            - "ED": Expected depth (D / alpha)
+            - "RGB+D", "RGB+ED": Combined color and depth
+            - "D_ALL": Returns [D, ED, VIS] where VIS is the original Gaussian
+              index of the last contributing Gaussian per pixel (-1 for background)
         rasterize_mode: "classic" or "antialiased".
         
     Returns:
-        render_colors: Rendered images. [C, H, W, D]
+        render_colors: Rendered images. [C, H, W, D] (D=3 for D_ALL: [D, ED, VIS])
         render_alphas: Rendered alpha masks. [C, H, W, 1]
-        meta: Dictionary with intermediate results.
+        meta: Dictionary with intermediate results. For D_ALL mode, includes
+              'visible_indices' mapping filtered to original Gaussian indices.
         
     Example:
         >>> means = torch.randn(10000, 3, device="cpu")
@@ -160,7 +167,7 @@ def rasterization_metal(
         )
     
     # Validate render mode
-    assert render_mode in ["RGB", "D", "ED", "RGB+D", "RGB+ED"], \
+    assert render_mode in ["RGB", "D", "ED", "RGB+D", "RGB+ED", "D_ALL"], \
         f"Invalid render_mode: {render_mode}"
     
     meta = {}
@@ -290,7 +297,7 @@ def rasterization_metal(
                 backgrounds,
                 torch.zeros(C, 1, device=device)
             ], dim=-1)
-    elif render_mode in ["D", "ED"]:
+    elif render_mode in ["D", "ED", "D_ALL"]:
         colors = depths.unsqueeze(-1)
         if backgrounds is not None:
             backgrounds = torch.zeros(C, 1, device=device)
@@ -342,8 +349,9 @@ def rasterization_metal(
     if backgrounds is not None:
         backgrounds, _ = pad_channels(backgrounds)
     
-    # Rasterize
-    render_colors, render_alphas = rasterize_to_pixels_metal(
+    # Rasterize - request last_ids for D_ALL mode
+    need_last_ids = (render_mode == "D_ALL")
+    render_colors, render_alphas, last_ids = rasterize_to_pixels_metal(
         means2d_flat.reshape(-1, 2),  # Flatten to [I*N, 2]
         conics_flat.reshape(-1, 3),
         colors_flat.reshape(-1, colors_flat.shape[-1]),
@@ -354,6 +362,7 @@ def rasterization_metal(
         isect_offsets,
         flatten_ids,
         backgrounds=backgrounds,
+        return_last_ids=need_last_ids,
     )
     
     # Trim padding
@@ -364,8 +373,41 @@ def rasterization_metal(
     render_colors = render_colors.reshape(B, C, height, width, -1)
     render_alphas = render_alphas.reshape(B, C, height, width, 1)
     
-    # Handle expected depth normalization
-    if render_mode in ["ED", "RGB+ED"]:
+    # Handle D_ALL mode: return [D, ED, VIS] stacked
+    if render_mode == "D_ALL":
+        D = render_colors[..., 0]  # Accumulated weighted depth
+        alpha_safe = render_alphas[..., 0].clamp(min=1e-10)
+        ED = D / alpha_safe  # Expected depth
+        
+        # Remap last_ids to original Gaussian indices
+        # last_ids contains indices into the sorted isect array
+        # We need: isect_idx -> flatten_ids[isect_idx] -> filtered_idx -> visible_indices[filtered_idx] -> original_idx
+        last_ids = last_ids.reshape(B, C, height, width)
+        
+        # Create output tensor for original indices (-1 for background/invalid)
+        VIS = torch.full_like(last_ids, -1, dtype=torch.int64)
+        
+        # Valid pixels have last_ids >= 0 and < n_isects
+        n_isects = flatten_ids.shape[0]
+        valid_mask = (last_ids >= 0) & (last_ids < n_isects)
+        
+        if valid_mask.any():
+            # Get filtered Gaussian index from flatten_ids
+            valid_isect_ids = last_ids[valid_mask].long()
+            filtered_gaussian_ids = flatten_ids[valid_isect_ids].long()
+            
+            # Map filtered indices to original indices via visible_indices
+            original_gaussian_ids = visible_indices[filtered_gaussian_ids]
+            VIS[valid_mask] = original_gaussian_ids.long()
+        
+        # Stack [D, ED, VIS] as the output
+        render_colors = torch.stack([D, ED, VIS.float()], dim=-1)
+        
+        # Store visible_indices in meta for reference
+        meta["visible_indices"] = visible_indices
+    
+    # Handle expected depth normalization for ED and RGB+ED modes
+    elif render_mode in ["ED", "RGB+ED"]:
         # ED = sum(w_i * d_i) / sum(w_i)
         # render_colors already has weighted depth, divide by alpha
         depth_idx = -1 if render_mode == "ED" else colors.shape[-1] - 1
@@ -381,3 +423,4 @@ def rasterization_metal(
         render_alphas = render_alphas.squeeze(0)
     
     return render_colors, render_alphas, meta
+

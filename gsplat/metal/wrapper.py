@@ -413,12 +413,18 @@ def rasterize_to_pixels_metal(
     isect_offsets: Tensor,
     flatten_ids: Tensor,
     backgrounds: Optional[Tensor] = None,
-) -> Tuple[Tensor, Tensor]:
+    return_last_ids: bool = False,
+) -> Tuple[Tensor, Tensor, Optional[Tensor]]:
     """Rasterize Gaussians to pixels using Metal.
+    
+    Args:
+        return_last_ids: If True, also return the last contributing Gaussian index per pixel.
     
     Returns:
         render_colors: Rendered colors [I, H, W, C]
         render_alphas: Rendered alphas [I, H, W]
+        last_ids: (Optional) Last contributing Gaussian index per pixel [I, H, W], 
+                  indices into flatten_ids array. Only returned if return_last_ids=True.
     """
     if not is_metal_available():
         raise RuntimeError("Metal is not available")
@@ -480,7 +486,11 @@ def rasterize_to_pixels_metal(
         
         render_colors_buf, _ = tensor_to_metal_buffer(render_colors, device)
         render_alphas_buf, _ = tensor_to_metal_buffer(render_alphas, device)
-        last_ids_buf = device.create_buffer(I * image_height * image_width * 4)
+        
+        # Initialize last_ids with -1
+        last_ids_init = torch.full((I, image_height, image_width), -1, 
+                                   dtype=torch.int32, device=means2d.device)
+        last_ids_buf, _ = tensor_to_metal_buffer(last_ids_init, device)
         
         encoder.setBuffer_offset_atIndex_(means2d_buf, 0, 0)
         encoder.setBuffer_offset_atIndex_(conics_buf, 0, 1)
@@ -527,10 +537,17 @@ def rasterize_to_pixels_metal(
             render_alphas_buf, (I, image_height, image_width), torch.float32
         )
         
+        # Optionally read back last_ids (index of last contributing Gaussian per pixel)
+        last_ids = None
+        if return_last_ids:
+            last_ids = metal_buffer_to_tensor(
+                last_ids_buf, (I, image_height, image_width), torch.int32
+            )
+        
     except Exception as e:
         raise RuntimeError(f"Metal rasterization failed: {e}")
     
-    return render_colors, render_alphas
+    return render_colors, render_alphas, last_ids
 
 
 def spherical_harmonics_metal(

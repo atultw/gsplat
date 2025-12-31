@@ -112,6 +112,8 @@ kernel void rasterize_to_pixels_fwd(
     // Per-thread state
     float T = 1.0f;  // Transmittance
     uint cur_idx = 0;
+    float max_contrib = 0.0f;
+    int best_cur_idx = -1;
     
     // Fixed channel array (Metal doesn't support VLAs)
     float pix_out[64];
@@ -174,6 +176,12 @@ kernel void rasterize_to_pixels_fwd(
             }
             
             cur_idx = batch_start + t;
+            
+            if (vis > max_contrib) {
+                max_contrib = vis;
+                best_cur_idx = int(cur_idx);
+            }
+            
             T = next_T;
         }
     }
@@ -190,7 +198,7 @@ kernel void rasterize_to_pixels_fwd(
         }
         
         render_alphas[pixel_offset_base + pix_id] = 1.0f - T;
-        last_ids[pixel_offset_base + pix_id] = int(cur_idx);
+        last_ids[pixel_offset_base + pix_id] = best_cur_idx;
     }
 }
 
@@ -265,6 +273,8 @@ kernel void rasterize_to_pixels_fwd_rgb(
     
     float T = 1.0f;
     uint cur_idx = 0;
+    float max_contrib = 0.0f;
+    int best_cur_idx = -1;
     float3 pix_out = float3(0.0f);
     
     for (uint b = 0; b < num_batches; ++b) {
@@ -302,6 +312,12 @@ kernel void rasterize_to_pixels_fwd_rgb(
             float vis = alpha * T;
             pix_out += float3(colors[g * 3], colors[g * 3 + 1], colors[g * 3 + 2]) * vis;
             cur_idx = batch_start + t;
+            
+            if (vis > max_contrib) {
+                max_contrib = vis;
+                best_cur_idx = int(cur_idx);
+            }
+            
             T = next_T;
         }
     }
@@ -315,7 +331,7 @@ kernel void rasterize_to_pixels_fwd_rgb(
         render_colors[out_idx + 1] = pix_out.y + T * bg.y;
         render_colors[out_idx + 2] = pix_out.z + T * bg.z;
         render_alphas[pixel_offset_base + pix_id] = 1.0f - T;
-        last_ids[pixel_offset_base + pix_id] = int(cur_idx);
+        last_ids[pixel_offset_base + pix_id] = best_cur_idx;
     }
 }
 
@@ -379,6 +395,8 @@ kernel void rasterize_to_pixels_fwd_depth(
     
     float T = 1.0f;
     uint cur_idx = 0;
+    float max_contrib = 0.0f;
+    int best_cur_idx = -1;
     float pix_out = 0.0f;
     
     for (uint b = 0; b < num_batches; ++b) {
@@ -413,8 +431,15 @@ kernel void rasterize_to_pixels_fwd_depth(
             if (next_T <= 1e-4f) { done = true; break; }
             
             int g = id_batch[t];
-            pix_out += colors[g] * alpha * T;
+            float contrib = alpha * T;
+            pix_out += colors[g] * contrib;
             cur_idx = batch_start + t;
+            
+            if (contrib > max_contrib) {
+                max_contrib = contrib;
+                best_cur_idx = int(cur_idx);
+            }
+            
             T = next_T;
         }
     }
@@ -423,6 +448,6 @@ kernel void rasterize_to_pixels_fwd_depth(
         float bg = (backgrounds != nullptr) ? backgrounds[image_id] : 0.0f;
         render_colors[pixel_offset_base + pix_id] = pix_out + T * bg;
         render_alphas[pixel_offset_base + pix_id] = 1.0f - T;
-        last_ids[pixel_offset_base + pix_id] = int(cur_idx);
+        last_ids[pixel_offset_base + pix_id] = best_cur_idx;
     }
 }
